@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Monitor de Som Ambiente</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/1.2.1/chartjs-plugin-zoom.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #resetZoomButton {
+            background-color: #2196F3;
+        }
+        #resetZoomButton:hover {
+            background-color: #1976D2;
+        }
+        #status {
+            margin: 10px 0;
+            font-weight: bold;
+        }
+        .chart-container {
+            position: relative;
+            height: 400px;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Monitor de Som Ambiente</h1>
+        <div class="controls">
+            <button id="startButton">Iniciar Monitoramento</button>
+            <button id="resetZoomButton" disabled>Resetar Visualização</button>
+        </div>
+        <p id="status">Status: Aguardando início</p>
+        <div class="chart-container">
+            <canvas id="soundChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        let audioContext;
+        let microphone;
+        let analyser;
+        let chart;
+        let dataPoints = [];
+        const MAX_DATA_POINTS = 720; // Mantém 1 hora de dados (720 pontos * 5 segundos)
+
+        // Configuração do gráfico
+        const ctx = document.getElementById('soundChart').getContext('2d');
+        chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Intensidade Sonora',
+                    data: [],
+                    borderColor: 'rgb(75, 192, 192)',
+                    tension: 0.1,
+                    pointRadius: 2,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 100,
+                        title: {
+                            display: true,
+                            text: 'Intensidade (%)'
+                        }
+                    },
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Hora'
+                        }
+                    }
+                },
+                plugins: {
+                    zoom: {
+                        pan: {
+                            enabled: true,
+                            mode: 'x',
+                            modifierKey: 'ctrl',
+                        },
+                        zoom: {
+                            wheel: {
+                                enabled: true,
+                            },
+                            pinch: {
+                                enabled: true
+                            },
+                            mode: 'x',
+                        },
+                        limits: {
+                            x: {min: 'original', max: 'original'},
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return `Intensidade: ${context.parsed.y.toFixed(1)}%`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Função para obter a hora atual formatada
+        function getCurrentTime() {
+            const now = new Date();
+            return now.toLocaleTimeString('pt-BR', { 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit' 
+            });
+        }
+
+        // Função para calcular a intensidade sonora
+        function calculateSoundIntensity(dataArray) {
+            const sum = dataArray.reduce((acc, val) => acc + Math.abs(val), 0);
+            const average = sum / dataArray.length;
+            return (average / 128) * 100; // Normaliza para 0-100
+        }
+
+        // Função para atualizar o gráfico
+        function updateChart(intensity) {
+            const currentTime = getCurrentTime();
+            
+            dataPoints.push({
+                time: currentTime,
+                intensity: intensity
+            });
+
+            // Mantém apenas os últimos MAX_DATA_POINTS pontos
+            if (dataPoints.length > MAX_DATA_POINTS) {
+                dataPoints.shift();
+            }
+
+            // Atualiza o gráfico
+            chart.data.labels = dataPoints.map(point => point.time);
+            chart.data.datasets[0].data = dataPoints.map(point => point.intensity);
+            chart.update('quiet'); // Atualização silenciosa para manter o zoom/pan
+        }
+
+        // Reset zoom button
+        document.getElementById('resetZoomButton').addEventListener('click', () => {
+            chart.resetZoom();
+        });
+
+        // Inicializa a captura de áudio
+        document.getElementById('startButton').addEventListener('click', async () => {
+            try {
+                // Inicializa o contexto de áudio
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                microphone = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                
+                microphone.connect(analyser);
+                
+                const statusElement = document.getElementById('status');
+                statusElement.textContent = 'Status: Monitorando';
+                
+                // Array para armazenar os dados do analisador
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                
+                // Função que coleta e atualiza os dados a cada 5 segundos
+                const updateData = () => {
+                    analyser.getByteFrequencyData(dataArray);
+                    const intensity = calculateSoundIntensity(dataArray);
+                    updateChart(intensity);
+                };
+                
+                // Inicia a atualização periódica
+                updateData();
+                setInterval(updateData, 1000);
+                
+                document.getElementById('startButton').disabled = true;
+                document.getElementById('resetZoomButton').disabled = false;
+            } catch (error) {
+                console.error('Erro ao acessar o microfone:', error);
+                document.getElementById('status').textContent = 
+                    'Erro: Não foi possível acessar o microfone. Por favor, verifique as permissões.';
+            }
+        });
+    </script>
+</body>
+</html>
